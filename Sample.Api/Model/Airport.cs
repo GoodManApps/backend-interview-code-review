@@ -1,5 +1,11 @@
-﻿namespace Sample.Api.Model {
-	public struct Airport {
+﻿namespace Sample.Api.Model
+{
+	// Общие комментарии:
+	// 1) Отсутствуют комментарии к типу, а также к полям, конструктораам и методам типа
+	// 2 Отсутствует поле alias, country и altitude для аэропорта
+	// 3) Заменил бы структура на тип для аэропорта
+
+	public class Airport {
 		public string Name { get; set; }
 		public string City { get; set; }
 		public double Latitude { get; set; }

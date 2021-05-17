@@ -2,95 +2,141 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Net.Http;
+using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Configuration;
 using Sample.Api.Model;
 
 namespace Sample.Api.App
 {
-	public class AirportService : HttpClient
+	// Общие комментарии:
+	// 1) Отсутствуют комментарии к типу, а также к полям, конструктораам и методам типа
+	// 2) Сервис не должен получать адрес api напрямую в конструкторе. 
+	// Небходимо создать интерфейс, который должен реализовать текущий сервис (решает несколько задач, в том числе использование Mock в тестах).
+	// В качестве параметра конструктора выполнить передачу настроек конфигурации из appsettings
+	// 2.1) Желательно не наследоваться от HttpClient, а создать скрытый экземпляр этого типа. И в методах делать запросы с его помощью,
+	// а также реализовать интерфейс IDisposable, где бы освобожались ресурсы клиента.
+	// 3) Не должно быть закомментированного кода
+	// 4) Возвращаемые перечисляемые типы желательно объявлять IEnumerable
+	// 5) Нет валидации параметров (для примера добавил в конструктор
+
+	public class AirportService : IAiportService
 	{
-		public string ApiHost;
-		public AirportService(string apiHost)
+		// Переменная должна иметь модификатор доступа private readonly
+		private readonly string ApiHost;
+		private readonly HttpClient client;
+		private readonly DistanceCalculator distanceHelper;
+		private bool disposedValue;
+		private const string aiportEndpoint = "Endpoints:AirportService";
+		private const string aiportSerachUrl = "Airport/search";
+
+		public AirportService(IConfiguration configuration)
 		{
-			ApiHost = apiHost;
+			if (configuration == null)
+				throw new ArgumentNullException(nameof(configuration));
+
+			ApiHost = configuration.GetSection(aiportEndpoint)?.Value;
+
+			if (!Uri.TryCreate(ApiHost, UriKind.Absolute, out Uri BaseUri))
+				throw new ArgumentException("Некорректный формат адреса URL в файле конфигураций", nameof(configuration));
+
+			client = new HttpClient()
+			{
+				BaseAddress = BaseUri
+			};
+
+			distanceHelper = new DistanceCalculator();
 		}
 
-		public List<AirportPair> CalculateDistance(List<Airport> airports)
+		public IEnumerable<AirportPair> CalculateDistance(IEnumerable<Airport> airports)
 		{
-			List<AirportPair> pairs = new List<AirportPair>();
-			Queue<Airport> queue = new Queue<Airport>(airports);
-			Airport currentPort;
-			while (queue.TryDequeue(out currentPort)) {
-				foreach (Airport airport in queue) {
-					if (!currentPort.City.Equals(airport.City)) {
-						var distanceHelper = new DistanceCalculator();
-						pairs.Add(new AirportPair() {
-							First = currentPort,
-							Second = airport,
-							Distance = distanceHelper.DistanceBetweenPlaces(currentPort, airport)
-						});
-					}
-				}
-			}
+			// distanceHelper перенёс в область члена типа
+			// Вместо бессмысленного двойного перебора по очереди использовать код:
+			var airportsPairs = airports.
+				SelectMany(currentPort =>
+				{
+					return airports
+						.Where(airport => !airport.City.Equals(currentPort.City))
+						.Select(airport =>
+						{
+							return new AirportPair()
+							{
+								First = currentPort,
+								Second = airport,
+								Distance = distanceHelper.DistanceBetweenPlaces(currentPort, airport)
+							};
+						});					
+				});
 
-			return pairs;
+			return airportsPairs;
 		}
 
-		public async Task<List<Airport>> GetAirports(string[] cities)
+		public async Task<IEnumerable<Airport>> GetAirportsAsync(string[] cities)
 		{
-			cities = cities.Select(a => a.ToLower()).Distinct().ToArray();
-			List<Airport> ports = new List<Airport>();
+			// Преобразовать код вместо перебора на LINQ запрос, распаралеллив запросы по описку:
 
-			foreach (string city in cities) {
-				var cityPorts = await GetAirport(city);
-				ports.AddRange(cityPorts.Where(port => port.City.ToLower().Equals(city)));
-			}
+			var tasks = await Task.WhenAll(
+				cities
+					.Select(city => city.ToLower())
+					.Distinct()
+					.Select(async city =>
+					{
+						return await GetAirports(city);
+					}));
+
+			var ports = tasks
+				.Where(result => result != null)
+				.SelectMany(_ => _.Select(airport => airport));
+
 			return ports;
 		}
 
-//		public async Task<Airport[]> GetAirports(string[] cities)
-//		{
-//			string url = "Airport/search";
-//			Uri requestUri = new Uri(ApiHost + $"/Airport/search?pattern={string.Join(",", cities)}");
-//			try {
-//				var response = await GetAsync(requestUri);
-//
-//				Airport[] result = null;
-//				if (response.IsSuccessStatusCode) {
-//					result = await response.Content.ReadAsAsync<Airport[]>();
-//					return result;
-//				} else {
-//					return null;
-//				}
-//			} catch (Exception ex) {
-//				System.Diagnostics.Trace.TraceError($"Something happen during web service call: {ex.Message}");
-//				throw ex;
-//			}
-//
-//			return null;
-//		}
-
-		public async Task<Airport[]> GetAirport(string city)
+		// Переименовать метод, так как возвращается массив
+		public async Task<Airport[]> GetAirports(string city)
 		{
-			string url = "Airport/search";
-			Uri requestUri = new Uri(ApiHost + $"/Airport/search?pattern={city}");
+			// Перенёс переменную в константы типы.
+			
+			Uri requestUri = new Uri($"{aiportSerachUrl}?pattern={city}", UriKind.Relative);
 			try {
-				var response = await GetAsync(requestUri);
+				var response = await client.GetAsync(requestUri);
 
 				Airport[] result = null;
 				if (response.IsSuccessStatusCode) {
+					// Для более быстрого парсинга стоит использовать альтерный json converter, например, Utf8Json
 					result = await response.Content.ReadAsAsync<Airport[]>();
 					return result;
 				} else {
 					return null;
 				}
 			} catch (Exception ex) {
+				// Стоит использовать логгер для фиксации таких ошибок, например, NLog
 				System.Diagnostics.Trace.TraceError($"Something happen during web service call: {ex.Message}");
 				throw ex;
 			}
 
-			return null;
+			// Удалил недостижимый код
 		}
 
+		protected virtual void Dispose(bool disposing)
+		{
+			if (!disposedValue)
+			{
+				if (disposing)
+				{
+					client.Dispose();
+				}
+
+				// TODO: освободить неуправляемые ресурсы (неуправляемые объекты) и переопределить метод завершения
+				// TODO: установить значение NULL для больших полей
+				disposedValue = true;
+			}
+		}
+
+		public void Dispose()
+		{
+			// Не изменяйте этот код. Разместите код очистки в методе "Dispose(bool disposing)".
+			Dispose(disposing: true);
+			GC.SuppressFinalize(this);
+		}
 	}
 }
